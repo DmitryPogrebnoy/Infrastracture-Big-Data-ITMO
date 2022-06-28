@@ -1,0 +1,117 @@
+kubectl exec -it jupyter-spark-545795577c-n4m8m -- bash
+
+clickhouse-client --host=clickhouse-1.clickhouse.clickhouse --user=dpogrebnoj_338138 --ask-password
+
+Создание локальных таблиц:
+
+CREATE TABLE dpogrebnoj_338138.transactions ON CLUSTER
+kube_clickhouse_cluster
+(
+user_id_out Int64,
+user_id_in Int64,
+important Bool,
+amount Float64,
+datetime DateTime
+)
+ENGINE = MergeTree()
+PARTITION BY toYear(datetime)
+ORDER BY (user_id_out, user_id_in);
+
+
+DROP TABLE dpogrebnoj_338138.transactions ON CLUSTER kube_clickhouse_cluster
+
+DESCRIBE TABLE dpogrebnoj_338138.transactions
+
+
+Создание distr таблицы
+
+CREATE TABLE dpogrebnoj_338138.distr_transactions ON CLUSTER kube_clickhouse_cluster AS dpogrebnoj_338138.transactions
+ENGINE = Distributed(kube_clickhouse_cluster, dpogrebnoj_338138, transactions, intHash64(toYYYYMM(datetime)));
+
+
+DROP TABLE dpogrebnoj_338138.distr_transactions ON CLUSTER kube_clickhouse_cluster
+
+Загрузка данных в distr таблицу
+
+cat shared-data/clickhouse_data/transactions_12M.parquet | clickhouse-client --user=dpogrebnoj_338138 --host=clickhouse-1.clickhouse.clickhouse --ask-password --query="INSERT INTO dpogrebnoj_338138.distr_transactions FORMAT Parquet"
+
+
+DESCRIBE TABLE dpogrebnoj_338138.distr_transactions
+
+View номер 2
+
+CREATE MATERIALIZED VIEW dpogrebnoj_338138.transaction_view_2 ON CLUSTER kube_clickhouse_cluster
+ENGINE = AggregatingMergeTree()
+ORDER BY (user_id, date)
+AS (
+	SELECT out.user_id as user_id, out.date as date, out.important_count as out_important_count, in.important_count as in_important_count FROM 
+	(
+	SELECT user_id_out as user_id, toYYYYMMDD(datetime) as date, countIfState(important, important=1) as important_count
+	FROM dpogrebnoj_338138.transactions
+	GROUP BY user_id_out, toYYYYMMDD(datetime) 
+	) as out
+	INNER JOIN 
+	(
+	SELECT user_id_in as user_id, toYYYYMMDD(datetime) as date, countIfState(important, important=1) as important_count
+	FROM dpogrebnoj_338138.transactions
+	GROUP BY user_id_in, toYYYYMMDD(datetime) 
+	) as in
+	ON out.user_id = in.user_id AND out.date = in.date
+)
+
+DESCRIBE TABLE dpogrebnoj_338138.transaction_view_2
+
+CREATE TABLE dpogrebnoj_338138.distr_transaction_view_2 ON CLUSTER kube_clickhouse_cluster AS dpogrebnoj_338138.transaction_view_2
+ENGINE = Distributed(kube_clickhouse_cluster, dpogrebnoj_338138, transaction_view_2);
+
+DESCRIBE TABLE dpogrebnoj_338138.distr_transaction_view_2
+
+SELECT user_id, date, countIfMerge(out_important_count) as out_important_count, countIfMerge(in_important_count) as in_important_count FROM dpogrebnoj_338138.distr_transaction_view_2 GROUP BY user_id, date ORDER BY user_id, date LIMIT 20
+
+
+DROP VIEW dpogrebnoj_338138.transaction_view_2 ON CLUSTER kube_clickhouse_cluster
+DROP TABLE dpogrebnoj_338138.distr_transaction_view_2 ON CLUSTER kube_clickhouse_cluster
+
+View номер 3
+
+CREATE MATERIALIZED VIEW dpogrebnoj_338138.transaction_view_3 ON CLUSTER kube_clickhouse_cluster
+ENGINE = AggregatingMergeTree()
+ORDER BY (user_id, date_month)
+AS (
+	SELECT out.user_id as user_id, out.date_month as date_month, out.amount_sum as out_amount_sum, in.amount_sum as in_amount_sum FROM 
+	(
+	SELECT user_id_out as user_id, toYYYYMM(datetime) as date_month, sumState(amount) as amount_sum
+	FROM dpogrebnoj_338138.transactions
+	GROUP BY user_id_out, date_month
+	) as out
+	INNER JOIN 
+	(
+	SELECT user_id_in as user_id, toYYYYMM(datetime) as date_month, sumState(amount) as amount_sum
+	FROM dpogrebnoj_338138.transactions
+	GROUP BY user_id_in, date_month
+	) as in
+	ON out.user_id = in.user_id AND out.date_month = in.date_month
+)
+
+DESCRIBE TABLE dpogrebnoj_338138.transaction_view_3
+
+CREATE TABLE dpogrebnoj_338138.distr_transaction_view_3 ON CLUSTER kube_clickhouse_cluster AS dpogrebnoj_338138.transaction_view_3
+ENGINE = Distributed(kube_clickhouse_cluster, dpogrebnoj_338138, transaction_view_3);
+
+DESCRIBE TABLE dpogrebnoj_338138.distr_transaction_view_3
+
+DROP VIEW dpogrebnoj_338138.transaction_view_3 ON CLUSTER kube_clickhouse_cluster
+DROP TABLE dpogrebnoj_338138.distr_transaction_view_3 ON CLUSTER kube_clickhouse_cluster
+
+
+SELECT user_id, date_month, sumMerge(out_amount_sum) as out_amount_sum, sumMerge(in_amount_sum) as in_amount_sum FROM dpogrebnoj_338138.distr_transaction_view_3 GROUP BY user_id, date_month ORDER BY user_id, date_month LIMIT 20
+
+
+
+SELECT user_id, date_month, sumMerge(out_amount_sum) as out_amount_sum, sumMerge(in_amount_sum) as in_amount_sum FROM dpogrebnoj_338138.distr_transaction_view_3
+WHERE user_id IN (8, 1234, 5678, 9000) GROUP BY user_id, date_month ORDER BY user_id, date_month LIMIT 20
+
+
+
+
+
